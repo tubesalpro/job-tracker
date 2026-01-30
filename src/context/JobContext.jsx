@@ -1,47 +1,80 @@
 import React, { createContext, useState, useEffect } from 'react';
+import { db } from '../db';
+import { useLiveQuery } from 'dexie-react-hooks';
 
 export const JobContext = createContext();
 
 export const JobProvider = ({ children }) => {
-  const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // Load from localStorage on mount
+  // Use Dexie's live query for real-time sync
+  const jobs = useLiveQuery(
+    () => db.jobs.orderBy('createdAt').reverse().toArray(),
+    []
+  ) || [];
+
+  // Migration: Load from localStorage ONCE on first mount
   useEffect(() => {
-    const savedJobs = localStorage.getItem('jobApplications');
-    if (savedJobs) {
+    const migrateFromLocalStorage = async () => {
       try {
-        setJobs(JSON.parse(savedJobs));
+        const savedJobs = localStorage.getItem('jobApplications');
+        if (savedJobs) {
+          const localJobs = JSON.parse(savedJobs);
+          
+          // Check if database is empty
+          const count = await db.jobs.count();
+          
+          if (count === 0 && localJobs.length > 0) {
+            console.log('Migrating jobs from localStorage to Dexie Cloud...');
+            await db.jobs.bulkAdd(localJobs);
+            console.log(`Migrated ${localJobs.length} jobs successfully!`);
+            
+            // Optional: Remove from localStorage after successful migration
+            // localStorage.removeItem('jobApplications');
+          }
+        }
       } catch (error) {
-        console.error('Error loading jobs:', error);
+        console.error('Error migrating from localStorage:', error);
+      } finally {
+        setLoading(false);
       }
-    }
-    setLoading(false);
+    };
+
+    migrateFromLocalStorage();
   }, []);
 
-  // Save to localStorage whenever jobs change
-  useEffect(() => {
-    if (!loading) {
-      localStorage.setItem('jobApplications', JSON.stringify(jobs));
+  const addJob = async (job) => {
+    try {
+      const newJob = {
+        id: Date.now().toString(), // Dexie Cloud needs string ID
+        createdAt: new Date().toISOString(),
+        ...job
+      };
+      
+      await db.jobs.add(newJob);
+      return newJob;
+    } catch (error) {
+      console.error('Error adding job:', error);
+      throw error;
     }
-  }, [jobs, loading]);
-
-  const addJob = (job) => {
-    const newJob = {
-      id: Date.now(),
-      createdAt: new Date().toISOString(),
-      ...job
-    };
-    setJobs([newJob, ...jobs]);
-    return newJob;
   };
 
-  const updateJob = (id, updatedJob) => {
-    setJobs(jobs.map(job => job.id === id ? { ...job, ...updatedJob } : job));
+  const updateJob = async (id, updatedJob) => {
+    try {
+      await db.jobs.update(id, updatedJob);
+    } catch (error) {
+      console.error('Error updating job:', error);
+      throw error;
+    }
   };
 
-  const deleteJob = (id) => {
-    setJobs(jobs.filter(job => job.id !== id));
+  const deleteJob = async (id) => {
+    try {
+      await db.jobs.delete(id);
+    } catch (error) {
+      console.error('Error deleting job:', error);
+      throw error;
+    }
   };
 
   const getStatistics = () => {
@@ -51,12 +84,19 @@ export const JobProvider = ({ children }) => {
     const offered = jobs.filter(j => j.status === 'Offered').length;
     const accepted = jobs.filter(j => j.status === 'Accepted').length;
     const rejected = jobs.filter(j => j.status === 'Rejected').length;
-
+    
     return { total, applied, interview, offered, accepted, rejected };
   };
 
   return (
-    <JobContext.Provider value={{ jobs, addJob, updateJob, deleteJob, getStatistics, loading }}>
+    <JobContext.Provider value={{ 
+      jobs, 
+      addJob, 
+      updateJob, 
+      deleteJob, 
+      getStatistics, 
+      loading 
+    }}>
       {children}
     </JobContext.Provider>
   );
